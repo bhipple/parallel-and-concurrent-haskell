@@ -1,0 +1,22 @@
+
+* Overview
+** Distrinction between parallelism and concurrency, non-deterministic vs. deterministic
+    We usually prefer deterministic parallelism (just arrive at an answer sooner with mulitple CPUs), and
+    while concurrency is a more powerful concept that sacrifices determinisim.
+** Haskell's Philosophy
+    When it comes to multi-core programs, the simplest abstraction works: deterministic paralellism should
+    be used if sufficient. Haskell handles this by providing many APIs and libraries suited to specific
+    types of multi-core needs, which makes it easier to code but means there's a lot more to learn.
+* Parallel Haskell
+** Overview
+    Compile-time analysis is not good at making judgments about whether we gain more from parallelizing a
+    computation than it costs us to do so, and so automatic compiler parallelization is still a pipe dream.
+*** Pros/Cons of Haskell's approach
+    + High level and declarative: no explicit synchronization or communication code!
+    + Declarative
+    + Fully deterministic
+    - High level of abstraction makes it hard to tune manually and debug when performance problems arise
+*** Challenges
+    - Granularity: pick tasks too small and the overhead dwarfs the cost; pick tasks too large and the CPUs may be idle
+    - Data depdencies: naturally enforces sequential computation
+** Chapter 2. Basic Parallelism: The Eval Monad
