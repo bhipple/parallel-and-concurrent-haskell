@@ -19,3 +19,7 @@ cabal.sandbox.config
 dist
 dist-*
 examples
+parconc-examples-0.4.5/rpar
+parconc-examples-0.4.5/sudoku1
+parconc-examples-0.4.5/sudoku2
+parconc-examples-0.4.5/sudoku3

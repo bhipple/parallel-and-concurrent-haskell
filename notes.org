@@ -1,3 +1,4 @@
+http://chimera.labs.oreilly.com/books/1230000000929/index.html
 
 * Overview
 ** Distrinction between parallelism and concurrency, non-deterministic vs. deterministic
@@ -20,3 +21,270 @@
     - Granularity: pick tasks too small and the overhead dwarfs the cost; pick tasks too large and the CPUs may be idle
     - Data depdencies: naturally enforces sequential computation
 ** Chapter 2. Basic Parallelism: The Eval Monad
+*** Lazy Evaluation and WHNF
+Demonstration of :sprint for evaluation inspection in GHCI.
+
+Demonstration that the seq function evaluates to WHNF, and what that means:
+import Data.Tuple
+#+BEGIN_SRC haskell
+let x = 1 + 2 :: Int
+let z = swap(x,x+1)
+
+:sprint z
+-- Shows that z = _
+
+seq z ()
+:sprint z
+-- Shows that z = (_,_); i.e. seq evaluated z to its constructor but not through the elements
+
+seq x ()
+:sprint z
+-- Shows that z = (_, 3)
+#+END_SRC
+*** The Eval Monad, rpar, and rseq
+Defined in Control.Parallel.Strategies
+#+BEGIN_SRC haskell
+data Eval a
+instance Monad Eval
+
+runEval :: Eval a -> a
+
+rpar :: a -> Eval a
+rseq :: a -> Eval a
+#+END_SRC
+
+Given a function f, two arguments x and y, calculate the results in parallel and return a tuple
+The return happens immediately: it doesn't wait for a and b, but a and b are being computed
+in parallel in the background while the program executes.
+#+BEGIN_SRC haskell
+runEval $ do
+  a <- rpar (f x)
+  b <- rpar (f y)
+  return (a,b)
+#+END_SRC
+
+If we want to stop a line until a computation finishes, use rseq.
+Here a and b will be computed simultaneously, but return will not return
+until b is completed (even if a is not completed).
+#+BEGIN_SRC haskell
+runEval $ do
+  a <- rpar (f x)
+  b <- rseq (f y)
+  return (a,b)
+#+END_SRC
+
+And finally if we want to compute a and be in parallel but block the return until they're
+BOTH done, then we use this. Because of purity, the second rseq a is a no-op.
+#+BEGIN_SRC haskell
+runEval $ do
+  a <- rpar (f x)
+  b <- rseq (f y)
+  rseq a
+  return (a,b)
+#+END_SRC
+
+See rpar.hs for an interactive demonstration of these options
+*** Parallelizing a Soduku Solver
+**** Sequential sudoku1.hs
+See soduku1.hs for an example that solves multiple puzzles sequentially.
+Compile with `-O2 -rtsopts`, and pass it `+RTS -s` when running
+
+**** Two-core sudoku2.hs
+sudoku2.hs splits the problem in half and runs it on two cores.
+Compile ith `-O2 -rtsopts -threaded`, pass it `+RTS -N2 -s` to run with 2 processors.
+We should see the CPU time stay the same, but the elapsed time decrease noticeably.
+We aren't getting a 2x speedup, though, so let's use threadscope to inspect what's happening.
+
+***** Note on force
+Note that we have to use the `force :: NFData a => a -> a` function from Control.DeepSeq
+to get the rpar functions to actually evaluate anything! This is the default behavior
+in the Par monad, since it's common to need to do this.
+**** Threadscope and Partitioning Strategies
+***** Threadscope
+Compile with -eventlog, and run with -l in addition to the other flags previously used.
+
+In threadscope, we can see that even though we divided the number of
+problems evenly in sudoku2.hs, one core ended up with problems that
+were harder to solve and took more time to do so.
+
+***** Static Partitioning
+Fixed division of work, defined in the code.
+***** Dynamic Partitioning
+Distributing smaller units of work among processors at runtime.
+
+In GHC, we accomplish this with Sparks, which are the arguments to rpar.
+Idle processes implement work stealing from the runtime spark pool.
+**** Dynamic partitioning with parMap sparks in sudoku3.hs
+This accomplishes our 2x speedup on 2 cores.
+#+BEGIN_SRC haskell
+parMap :: (a -> b) -> [a] -> Eval [b]
+parMap f [] = return []
+parMap f (a:as) = do
+  b <- rpar (f a)
+  bs <- parMap f as
+return (b:bs)
+#+END_SRC
+
+Moreover, it now scales to any arbitrary number of processors!
+*** Amdahl's law, lazy evaluation, and speedup
+If we look closely at the above sudoku3.hs threadscope analysis, we
+can see that sparks are being generated and started on CPUs before
+we've finished reading the file. Lazy evaluation gives us a better
+speedup here!
+
+If we were to insist on calculating the length of the file list
+before starting the parallel, we'd notice the difference.
+
+Amdah's law gives the maximum speedup as the ratio:
+  1 / ((1 - P) + P/N)
+where P is the portion of the runtime that can be parallelized, and N
+is the number of processors available.
+
+*** Spark terminology
+- Converted:
+  Sparks that were turned into real parallelism at runtime
+- Overflowed:
+  Sparks that we tried to create when the spark pool was
+  full, which causes them to be dropped
+- Dud: 
+  Occurs when rpar is applied to an already evaluated expression
+- GC'd:
+  Unused spark expression removed by the runtime.
+- Fizzled:
+  Unevaluated spark was later evaluated independently by the program.
+  Fizzled sparks get removed from the spark pool.
+*** Deepseq
+Deepseq (or force) relies on the type a being an instance of NFData.
+#+BEGIN_SRC haskell
+class NFData a where
+  rnf :: a -> ()
+  rnf a = a `seq` ()
+
+deepseq :: NFData a => a -> b -> b
+deepseq a b = rnf a `seq` b
+
+force :: NFData a => a -> a
+force x = x `deepseq` x
+
+#+END_SRC
+By default, this just relies on seq, but if we have something like a
+Tree we need to provide a `rnf` implementation that fully evaluates
+all the branches.
+
+Note that deepseq is necessarily O(n), while seq is O(1).
+Don't call it repeatedly!
+** Chapter 3. Evaluation Strategies
+*** Overview
+Strategies are a means for modularizing parallel code by separating
+the algorithm from the parallelism.
+
+A strategy takes a data structure as input, traverses it creating
+parallelism with rpar and rseq, and then returns the original value.
+
+#+BEGIN_SRC haskell
+type Strategy a = a -> Eval a
+
+parPair :: Strategy (a,b)
+parPair (a,b) = do
+  a' <- rpar a
+  b' <- rpar b
+  return (a',b')
+
+-- Evaluate the two computations in parallel
+(fib 35, fib 36) `using` parPair
+#+END_SRC
+
+*** Parameterized Strategies
+We may want to parameterize the strategies so that we can pass
+different ones to our evalPair.
+
+#+BEGIN_SRC haskell
+evalPair :: Strategy a -> Strategy b -> Strategy (a,b)
+evalPair sa sb (a,b) = do
+  a' <- sa a
+  b' <- sb b
+  return (a',b')
+
+parPair :: Strategy (a,b)
+parPair = evalPair rpar rpar
+#+END_SRC
+which also demostrates that rpar and rseq are Strategies themselves.
+
+*** A Strategy for Evaluating a List in Parallel
+
+#+BEGIN_SRC haskell
+parMap :: (a -> b) -> [a] -> [b]
+parMap f xs = map f xs `using` parList rseq
+
+-- Walk a list, applying the strat to each element
+evalList :: Strategy a -> Strategy [a]
+evalList strat [] = return []
+evalList strat (x:xs) = do
+  x' <- strat x
+  xs' <- evalList strat xs
+  return (x':xs')
+
+parList :: Strategy a -> Strategy [a]
+parList strat = evalList (rparWith strat)
+#+END_SRC
+
+The rparWith combinator allows us to apply a strategy and start it in
+parallel, but keep starting strategies even if the strat being used is
+something like rseq.
+
+*** Example: The K-Means Problem
+See the `kmeans` directory for a full example Haskell implementation.
+
+Demonstrates the lesson that parallization has some cost, and we have
+to be careful about the granularity we use.
+
+Example of using Threadscope to find parallelization bottlenecks: in
+this case, a print statement IO in a sequential section causes
+tremendous slowdown!
+*** GC'd Sparks and Speculative Parallelism
+The RTS will look for unreferenced spark computations and clean them
+up.  This means that if we make spark computations on an entire list,
+read some elements of the list, and then throw away the list, the RTS
+will cleanup the sparks!  We can see GC'd stats with the -s option.
+
+On the other hand, we have to be careful to continue to reference strategies
+in our program, or else the parallelism will be thrown away!
+
+Unless we're using speculative parallelization, a non-zero GC'd number is
+probably a sign that we've made a mistake.
+*** Parallelizing Lazy Streams with parBuffer
+We can use streams to consume input in parallel while using constant space.
+
+However, paralellizing a stream may involve forcing it, which causes
+it to use linear memory.
+
+To solve this, we have:
+#+BEGIN_SRC haskell
+-- in Control.Parallel.Strategies
+parBuffer :: Int -> Strategy a -> Strategy [a]
+#+END_SRC
+where the first argument is the buffer size; it will only create
+sparks for the first N elements at a time.
+
+Run `rsa.hs` with this and look at the Spark pool size graph in
+threadscope to verify that it does keep a constant supply of sparks.
+
+*** Chunking Strategies
+Chunks the input into a number of elements. Used when we have a list
+with either too many elements to spark them all, or computations that are
+too cheap to spark by themselves.
+
+#+BEGIN_SRC haskell
+-- in Control.Parallel.Strategies
+parListChunk :: Int -> Strategy a -> Strategy [a]
+#+END_SRC
+*** The Identity Property
+All strategies must return a value equal to the v alue it was passed, in order
+to satisfy:
+#+BEGIN_SRC haskell
+x `using` s == x
+#+END_SRC
+
+Note that some strategies (such as rdeepseq) might hit undefined,
+while just x would not.
+** Chapter 4. Dataflow Parallelism: The Par Monad
